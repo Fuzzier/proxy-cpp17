@@ -49,12 +49,14 @@ namespace pro {
 
 
 ////////////////////////////////////////////////////////////////////////////////
-#if defined(_MSC_VER)
-/// Empty base classes have zero size.
-#define NSFX_ENFORCE_EBO __declspec(empty_bases)
-#else
-#define NSFX_ENFORCE_EBO
-#endif  // defined(_MSC_VER)
+#if !defined(NSFX_ENFORCE_EBO)
+# if defined(_MSC_VER)
+/// Enforce empty base class optimization.
+#  define NSFX_ENFORCE_EBO __declspec(empty_bases)
+# else
+#  define NSFX_ENFORCE_EBO
+# endif  // defined(_MSC_VER)
+#endif // !defined(NSFX_ENFORCE_EBO)
 
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -282,7 +284,7 @@ namespace pro {
  * D + Os = C
  * @endverbatim
  *
- * Each convention deduces a `compsite_meta`.
+ * Each convention deduces a `composite_meta`.
  *
  * @verbatim
  * C = D + Os => composite_meta
@@ -346,12 +348,18 @@ template<class F> class proxy;
 ////////////////////////////////////////
 enum class constraint_level { none, nontrivial, nothrow, trivial };
 
+enum class diagnose_level { none, assert };
 
 namespace details {
 
 
 ////////////////////////////////////////////////////////////////////////////////
 using ptr_prototype = void*[2];
+
+
+////////////////////////////////////////
+struct copy_t {};
+struct move_t {};
 
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -433,38 +441,6 @@ struct proxiable_ptr_constraints_impl
 struct applicable_traits   { static constexpr bool applicable = true;  };
 struct inapplicable_traits { static constexpr bool applicable = false; };
 
-////////////////////////////////////////
-template<class T, class = void>
-struct is_applicable_concept_impl : std::false_type {};
-
-template<class T>
-struct is_applicable_concept_impl<T,
-    std::enable_if_t<(
-        /* `T::applicable` is a bool constant */
-        (std::is_same_v<decltype((T::applicable)), const bool&>) &&
-        /* `T::applicable` is evaluable at compile time */
-        ((void)T::applicable, true)),
-        void>>
-    : std::integral_constant<bool, T::applicable> {};
-
-/**
- * @brief `Ts::applicable...` exist and are all `true`.
- *
- * @remark When `Ts...` is empty, `is_applicable_concept<>` evaluates to `true`.
- */
-template<class... Ts>
-inline constexpr bool is_applicable_concept =
-    (is_applicable_concept_impl<Ts>::value && ...);
-
-
-////////////////////////////////////////////////////////////////////////////////
-struct EnableAssert : std::true_type {};
-struct DisableAssert : std::false_type {};
-
-
-struct copy_t {};
-struct move_t {};
-
 
 ////////////////////////////////////////////////////////////////////////////////
  /**
@@ -484,20 +460,22 @@ struct add_qualifier;
 template<class T>
 struct add_qualifier<T, qualifier_type::lv>
 {
-    using type = std::decay_t<T>&;
+    static_assert(!std::is_reference_v<T>);
+    using type = T&;
 };
 
 template<class T>
 struct add_qualifier<T, qualifier_type::rv>
 {
-    using type = std::decay_t<T>&&;
+    static_assert(!std::is_reference_v<T>);
+    using type = T&&;
 };
 
  /**
   * @brief The qualifier type of an overload type.
   *
   * @remark
-  *   It is safer to use `std::decay_t<>` than not.
+  *   There is a pitfall when `T` is a *reference* type.
   *   For example,
   *   ~~~
   *   constexpr auto Q = qualifier_type::const_lv;
@@ -516,13 +494,15 @@ struct add_qualifier<T, qualifier_type::rv>
 template<class T>
 struct add_qualifier<T, qualifier_type::const_lv>
 {
-    using type = const std::decay_t<T>&;
+    static_assert(!std::is_reference_v<T>);
+    using type = const T&;
 };
 
 template<class T>
 struct add_qualifier<T, qualifier_type::const_rv>
 {
-    using type = const std::decay_t<T>&&;
+    static_assert(!std::is_reference_v<T>);
+    using type = const T&&;
 };
 
 /**
@@ -1198,25 +1178,97 @@ inline void destruction_default_dispatcher(std::byte&) noexcept {}
  * * `R(Args...) && noexcept`
  * * `R(Args...) const`
  * * `R(Args...) const noexcept`
- * * `R(Args...) const&`
- * * `R(Args...) const& noexcept`
- * * `R(Args...) const&&`
- * * `R(Args...) const&& noexcept`
+ * * `R(Args...) const &`
+ * * `R(Args...) const & noexcept`
+ * * `R(Args...) const &&`
+ * * `R(Args...) const && noexcept`
+ *
+ * `overload_traits<O>` provides the following members:
+ * * V: `applicable : bool`
+ * * F: `check_applicable<diagnose_level>() -> bool`
+ * * V: `qualifier : qualifier_type`
+ * * V: `is_noexcept : bool`
+ * * T: `return_value`
+ * * T: `dispatch_type`
+ * * T: `meta_provider<IS_DIRECT, D>`
+ * * V: `applicable_ptr<P> : bool`
  */
 template<class O>
-struct overload_traits : inapplicable_traits {};
+struct overload_traits : inapplicable_traits
+{
+    template<diagnose_level level>
+    static constexpr bool check_applicable(void)
+    {
+        if constexpr (level == diagnose_level::assert)
+        {
+            constexpr bool is_applicable = (level == diagnose_level::assert);
+            static_assert(is_applicable,
+            "The overload O is inapplicable.\n"
+            "========================================\n"
+            "| The overload type must be one of the following function types:\n"
+            "|  * R(Args...)\n"
+            "|  * R(Args...) noexcept\n"
+            "|  * R(Args...) &\n"
+            "|  * R(Args...) & noexcept\n"
+            "|  * R(Args...) &&\n"
+            "|  * R(Args...) && noexcept\n"
+            "|  * R(Args...) const\n"
+            "|  * R(Args...) const noexcept\n"
+            "|  * R(Args...) const &\n"
+            "|  * R(Args...) const & noexcept\n"
+            "|  * R(Args...) const &&\n"
+            "|  * R(Args...) const && noexcept\n"
+            "========================================\n");
+        }
+        return applicable;
+    }
+};
+
+template<bool is_dispatch_ptr_indirect_applicable, class D, class O, class P>
+constexpr void assert_is_dispatch_ptr_indirect_applicable(void)
+{
+    static_assert(is_dispatch_ptr_indirect_applicable,
+    "The dispatch D, overload O and proxiable P are inapplicable "
+    "to generate dispatcher function for indirect convention\n"
+    "========================================\n"
+    "| * The proxiable type P shall be a dereferencable type\n"
+    "|   e.g., pointer, smart pointer, iterator, ...\n"
+    "| * If D is mem dispatch, P must be invocable as (*p).func(args...)\n"
+    "| * If D is free dispatch, P must be invocable as func(*p, args...)\n"
+    "| * Try to remove `noexcept` from the overload type O\n"
+    "|   P::operator*() may not be noexcept\n"
+    "========================================\n");
+}
+
+template<bool is_dispatch_ptr_direct_applicable, class D, class O, class P>
+constexpr void assert_is_dispatch_ptr_direct_applicable(void)
+{
+    static_assert(is_dispatch_ptr_direct_applicable,
+    "The dispatch D, overload O and proxiable P are inapplicable "
+    "to generate dispatcher function for direct convention\n"
+    "========================================\n"
+    "| * The proxiable type P shall be a value type\n"
+    "| * If D is mem dispatch, P must be invocable as p.func(args...)\n"
+    "| * If D is free dispatch, P must be invocable as func(p, args...)\n"
+    "| * Try to remove `noexcept` from the overload type O\n"
+    "========================================\n");
+}
 
 /**
  * @brief The overload traits.
  *
+ * @tparam O    The overload type. For diagnostic purpose.
  * @tparam Q    The qualifier.
  * @tparam NE   Is noexcept?
  * @tparam R    The return type.
  * @tparam Args The argument types.
  */
-template<qualifier_type Q, bool NE, class R, class... Args>
+template<class O, qualifier_type Q, bool NE, class R, class... Args>
 struct overload_traits_impl : applicable_traits
 {
+    template<diagnose_level level>
+    static constexpr bool check_applicable(void) { return applicable; }
+
     static constexpr qualifier_type qualifier = Q;
     static constexpr bool is_noexcept = NE;
     using return_type = R;
@@ -1232,16 +1284,14 @@ struct overload_traits_impl : applicable_traits
     /**
      * @brief A class template that generates dispatcher function.
      *
-     * @tparam D
-     *   The dispatch type that binds to the the name of actual callable.
-     *
      * @tparam IS_DIRECT
      *   The 1st argument of the actual callable is a reference to the proxiable
      *   object, instead of the dereferenced proxiable object.
+     * @tparam D
+     *   The dispatch type that binds to the the name of actual callable.
      *
-     * `meta_provider_impl` is nested in `overload_traits`, since the required
-     * pieces of meta information (`Q`, `NE`, `R`, `Args...`) are visible within
-     * `overload_traits`.
+     * `meta_provider` is nested in `overload_traits`, since the required pieces of
+     * meta information (`Q`, `NE`, `R`, `Args...`) are visible within `overload_traits`.
      *
      * The dispatcher function is generated via `D`, `O` and `P`.
      */
@@ -1271,17 +1321,48 @@ struct overload_traits_impl : applicable_traits
                 // Instantiate a dispatcher function, and return its pointer.
                 return &direct_conv_dispatcher<D, P, Q, R, Args...>;
             }
-            else if constexpr (
-                invocable_dispatch_concept<D, NE, R, std::nullptr_t, Args...>)
-            {
-                // Instantiate a dispatcher function, and return its pointer.
-                return &default_conv_dispatcher<D, Q, R, Args...>;
-            }
+            // else if constexpr (
+            //     invocable_dispatch_concept<D, NE, R, std::nullptr_t, Args...>)
+            // {
+            //     // Instantiate a dispatcher function, and return its pointer.
+            //     return &default_conv_dispatcher<D, Q, R, Args...>;
+            // }
             else
             {
                 return nullptr;
             }
         }
+
+        template<diagnose_level level, class P>
+        static constexpr bool check_applicable_ptr(void)
+        {
+            if constexpr (!IS_DIRECT)
+            {
+                constexpr bool is_dispatch_ptr_indirect_applicable =
+                    invocable_dispatch_ptr_indirect_concept<D, P, Q, NE, R, Args...>;
+                if constexpr (level == diagnose_level::assert)
+                {
+                    assert_is_dispatch_ptr_indirect_applicable<
+                        is_dispatch_ptr_indirect_applicable, D, O, P>();
+                }
+                return is_dispatch_ptr_indirect_applicable;
+            }
+            else // if constexpr (IS_DIRECT)
+            {
+                constexpr bool is_dispatch_ptr_direct_applicable =
+                    invocable_dispatch_ptr_direct_concept<D, P, Q, NE, R, Args...>;
+                if constexpr (level == diagnose_level::assert)
+                {
+                    assert_is_dispatch_ptr_direct_applicable<
+                        is_dispatch_ptr_direct_applicable, D, O, P>();
+                }
+                return is_dispatch_ptr_direct_applicable;
+            }
+        }
+
+        template<class P>
+        static constexpr bool applicable_ptr =
+            check_applicable_ptr<diagnose_level::none, P>();
     };
 
     /**
@@ -1292,46 +1373,57 @@ struct overload_traits_impl : applicable_traits
      */
     template<bool IS_DIRECT, class D, class P>
     static constexpr bool applicable_ptr =
-        meta_provider<IS_DIRECT, D>::template get<P>() != nullptr;
+            meta_provider<IS_DIRECT, D>::template applicable_ptr<P>;
 };
 
 template<class R, class... Args>
 struct overload_traits<R(Args...)>
-    : overload_traits_impl<qualifier_type::lv, false, R, Args...> {};
+    : overload_traits_impl<R(Args...), qualifier_type::lv, false, R, Args...> {};
 template<class R, class... Args>
 struct overload_traits<R(Args...) noexcept>
-    : overload_traits_impl<qualifier_type::lv, true, R, Args...> {};
+    : overload_traits_impl<R(Args...) noexcept, qualifier_type::lv, true, R, Args...> {};
 template<class R, class... Args>
 struct overload_traits<R(Args...) &>
-    : overload_traits_impl<qualifier_type::lv, false, R, Args...> {};
+    : overload_traits_impl<R(Args...) &, qualifier_type::lv, false, R, Args...> {};
 template<class R, class... Args>
 struct overload_traits<R(Args...) & noexcept>
-    : overload_traits_impl<qualifier_type::lv, true, R, Args...> {};
+    : overload_traits_impl<R(Args...) & noexcept, qualifier_type::lv, true, R, Args...> {};
 template<class R, class... Args>
 struct overload_traits<R(Args...) &&>
-    : overload_traits_impl<qualifier_type::rv, false, R, Args...> {};
+    : overload_traits_impl<R(Args...) &&, qualifier_type::rv, false, R, Args...> {};
 template<class R, class... Args>
 struct overload_traits<R(Args...) && noexcept>
-    : overload_traits_impl<qualifier_type::rv, true, R, Args...> {};
+    : overload_traits_impl<R(Args...) && noexcept, qualifier_type::rv, true, R, Args...> {};
 template<class R, class... Args>
 struct overload_traits<R(Args...) const>
-    : overload_traits_impl<qualifier_type::const_lv, false, R, Args...> {};
+    : overload_traits_impl<R(Args...) const, qualifier_type::const_lv, false, R, Args...> {};
 template<class R, class... Args>
 struct overload_traits<R(Args...) const noexcept>
-    : overload_traits_impl<qualifier_type::const_lv, true, R, Args...> {};
+    : overload_traits_impl<R(Args...) const noexcept, qualifier_type::const_lv, true, R, Args...> {};
 template<class R, class... Args>
-struct overload_traits<R(Args...) const&>
-    : overload_traits_impl<qualifier_type::const_lv, false, R, Args...> {};
+struct overload_traits<R(Args...) const &>
+    : overload_traits_impl<R(Args...) const &, qualifier_type::const_lv, false, R, Args...> {};
 template<class R, class... Args>
-struct overload_traits<R(Args...) const& noexcept>
-    : overload_traits_impl<qualifier_type::const_lv, true, R, Args...> {};
+struct overload_traits<R(Args...) const & noexcept>
+    : overload_traits_impl<R(Args...) const & noexcept, qualifier_type::const_lv, true, R, Args...> {};
 template<class R, class... Args>
-struct overload_traits<R(Args...) const&&>
-    : overload_traits_impl<qualifier_type::const_rv, false, R, Args...> {};
+struct overload_traits<R(Args...) const &&>
+    : overload_traits_impl<R(Args...) const &&, qualifier_type::const_rv, false, R, Args...> {};
 template<class R, class... Args>
-struct overload_traits<R(Args...) const&& noexcept>
-    : overload_traits_impl<qualifier_type::const_rv, true, R, Args...> {};
+struct overload_traits<R(Args...) const && noexcept>
+    : overload_traits_impl<R(Args...) const && noexcept, qualifier_type::const_rv, true, R, Args...> {};
 
+
+/**
+ * @brief The meta provider deduced from an overload type.
+ *
+ * @tparam D The dispatch type.
+ * @tparam O The overload type.
+ *
+ * `meta_provider<IS_DIRECT, D, O>` provides the following members:
+ * * V: `applicable_ptr<P> : bool`
+ * * F: `check_applicable_ptr<diagnose_level, P>() -> bool`
+ */
 template<bool IS_DIRECT, class D, class O>
 using meta_provider = typename overload_traits<O>
                     ::template meta_provider<IS_DIRECT, D>;
@@ -1551,8 +1643,7 @@ using composite_meta = recursive_reduction_t<
 
 ////////////////////////////////////////
 template<class CM>
-struct composite_meta_traits
-{
+struct composite_meta_traits{
     using meta = CM;
     static constexpr bool embed = false;
 };
@@ -1571,6 +1662,9 @@ struct composite_meta_traits<
         composite_meta_impl<dispatcher_meta<MP>, Ms...>>
 {
     using meta = composite_meta_impl<dispatcher_meta<MP>, Ms...>;
+
+    /// If the `composite_meta_impl<>` is small, then it is embedded in a proxy.
+    /// @see `meta_ptr<>`
     static constexpr bool embed =
         ( sizeof(meta) <=  sizeof(ptr_prototype)) &&
         (alignof(meta) <= alignof(ptr_prototype)) &&
@@ -1705,11 +1799,9 @@ using composite_accessor = recursive_reduction_t<
  *
  * @tparam D  The dispatch type.
  * @tparam Os The overload types.
- *
- * A convention represents a named method with a qualified signature.
  */
 template<bool IS_DIRECT, class D, class... Os>
-struct conv_impl
+struct convention
 {
     static constexpr bool is_direct = IS_DIRECT;
     using dispatch_type = D;
@@ -1722,44 +1814,39 @@ struct conv_impl
 
 ////////////////////////////////////////
 /**
- * @brief The requirements of convention type.
+ * @brief Diagnose the overload types of a convention type.
  *
- * @tparam C The convention type.
- *
- * It is required that a convention type must have the following member:
- * * `static constexpr bool C::is_direct`.
+ * @tparam C  The convention type.
+ * @tparam Os The overload types.
  */
-template<class C, class Assert, class... Os>
+template<class C, class... Os>
 struct diagnose_conv_overloads
 {
     ////////////////////
-    template<class C_ = C, class = void>
-    struct is_overloads_well_formed_impl : std::false_type {};
-
-    template<class C_>
-    struct is_overloads_well_formed_impl<C_,
-    std::enable_if_t<(
-        (std::is_same_v<C_, C>) &&
-        /* The convention has at least one overload type */
-        (sizeof...(Os) > 0u) &&
-        /* All overload types are applicable */
-        (is_applicable_concept<overload_traits<Os>...>)),
-        void>>
-        : std::true_type {};
-
-    static constexpr bool is_overloads_well_formed =
-            is_overloads_well_formed_impl<>::value;
-
-    static_assert(!Assert::value ||
-        sizeof...(Os) > 0u,
-        "The convention is inapplicable: there is no overload");
-    static_assert(!Assert::value ||
-        is_applicable_concept<overload_traits<Os>...>,
-        "The convention is inapplicable: some overload is inapplicable");
+    // overloads
+    ////////////////////
+    template<diagnose_level level>
+    static constexpr bool check_overloads_applicable(void)
+    {
+        constexpr std::size_t num_overloads = sizeof...(Os);
+        if constexpr (level == diagnose_level::assert)
+        {
+            static_assert(num_overloads > 0u,
+            "The convention C is inapplicable\n"
+            "========================================\n"
+            "| C::overload_types is empty\n"
+            "========================================\n");
+        }
+        constexpr bool overloads_applicable =
+            (overload_traits<Os>::template check_applicable<level>() && ...);
+        return (num_overloads > 0u) &&
+               overloads_applicable;
+    }
 };
 
+
 /**
- * @brief The requirements of convention type.
+ * @brief Diagnose a convention type.
  *
  * @tparam C The convention type.
  *
@@ -1769,11 +1856,18 @@ struct diagnose_conv_overloads
  * * `C::overload_types` is tuple-like; AND
  * * It has at least one overload type; AND
  * * All overload types are applicable.
+ *
+ * The following members are provided:
+ * * F: `check_applicable<diagnose_level>() -> bool`
+ * * V: `applicable: constexpr bool`
  */
-template<class C, class Assert = EnableAssert>
+template<class C>
 struct diagnose_conv
 {
     ////////////////////
+    // is_direct
+    ////////////////////
+private:
     template<class C_ = C, class = void>
     struct is_is_direct_well_formed_impl : std::false_type {};
 
@@ -1788,14 +1882,27 @@ struct diagnose_conv
         void>>
         : std::true_type {};
 
-    static constexpr bool is_is_direct_well_formed =
+    template<diagnose_level level>
+    static constexpr bool check_is_direct_well_formed(void)
+    {
+        constexpr bool is_is_direct_well_formed =
             is_is_direct_well_formed_impl<>::value;
-
-    static_assert(!Assert::value ||
-        is_is_direct_well_formed,
-        "The convention is inapplicable: `is_direct` is not a constexpr bool");
+        if constexpr (level == diagnose_level::assert)
+        {
+            static_assert(is_is_direct_well_formed,
+            "The convention C is inapplicable\n"
+            "========================================\n"
+            "| C::is_direct must exist\n"
+            "| C::is_direct must be a constexpr bool\n"
+            "========================================\n");
+        }
+        return is_is_direct_well_formed;
+    }
 
     ////////////////////
+    // dispatch_type
+    ////////////////////
+private:
     template<class C_ = C, class = void>
     struct is_dispatch_well_formed_impl : std::false_type {};
 
@@ -1803,24 +1910,37 @@ struct diagnose_conv
     struct is_dispatch_well_formed_impl<C_,
     std::enable_if_t<(
         (std::is_same_v<C_, C>) &&
-        /* `C::dispatch_type` exists */
+        /* `C::dispatch_type` exists and is trivial */
         (std::is_trivial_v<typename C_::dispatch_type>)),
         void>>
         : std::true_type {};
 
-    static constexpr bool is_dispatch_well_formed =
+    template<diagnose_level level>
+    static constexpr bool check_dispatch_well_formed(void)
+    {
+        constexpr bool is_dispatch_well_formed =
             is_dispatch_well_formed_impl<>::value;
-
-    static_assert(!Assert::value ||
-        is_dispatch_well_formed,
-        "The convention is inapplicable: `dispatch_type` is not a trivial type");
+        if constexpr (level == diagnose_level::assert)
+        {
+            static_assert(is_dispatch_well_formed,
+            "The convention C is inapplicable\n"
+            "========================================\n"
+            "| C::dispatch_type must exist\n"
+            "| C::dispatch_type must be trivial\n"
+            "========================================\n");
+        }
+        return is_dispatch_well_formed;
+    }
 
     ////////////////////
+    // overload_types
+    ////////////////////
+private:
     template<class C_ = C, class = void>
-    struct is_overloads_well_formed_impl : std::false_type {};
+    struct is_overloads_tuple_like_impl : std::false_type {};
 
     template<class C_>
-    struct is_overloads_well_formed_impl<C_,
+    struct is_overloads_tuple_like_impl<C_,
     std::enable_if_t<(
         (std::is_same_v<C_, C>) &&
         /* `C::overload_types` exists and is tuple-like */
@@ -1828,23 +1948,48 @@ struct diagnose_conv
         void>>
         : std::true_type {};
 
-    static constexpr bool is_overloads_well_formed =
-            is_overloads_well_formed_impl<>::value;
-
-    static_assert(!Assert::value ||
-        is_tuple_like_well_formed_concept<typename C::overload_types>,
-        "The convention is inapplicable: `overload_types` is not a tuple type");
+    template<diagnose_level level>
+    static constexpr bool check_overloads_well_formed(void)
+    {
+        constexpr bool is_overloads_tuple_like =
+            is_overloads_tuple_like_impl<>::value;
+        if constexpr (level == diagnose_level::assert)
+        {
+            static_assert(is_overloads_tuple_like,
+            "The convention C is inapplicable\n"
+            "========================================\n"
+            "| C:overload_types must exist\n"
+            "| C:overload_types must be tuple-like\n"
+            "========================================\n");
+        }
+        if constexpr (is_overloads_tuple_like)
+        {
+            using diagnose_overloads = instantiated_t<
+                diagnose_conv_overloads, typename C::overload_types, C>;
+            constexpr bool overloads_applicable =
+                diagnose_overloads
+                ::template check_overloads_applicable<level>();
+            return overloads_applicable;
+        }
+        return is_overloads_tuple_like;
+    }
 
     ////////////////////
-    using diagnose_overloads = instantiated_t<
-        diagnose_conv_overloads, typename C::overload_types, C, Assert>;
-
+    // applicable
     ////////////////////
+public:
+    template<diagnose_level level>
+    static constexpr bool check_applicable(void)
+    {
+        constexpr bool applicable =
+                check_is_direct_well_formed<level>() &&
+                check_dispatch_well_formed<level>() &&
+                check_overloads_well_formed<level>();
+        return applicable;
+    }
+
     static constexpr bool applicable =
-        is_is_direct_well_formed &&
-        is_dispatch_well_formed &&
-        is_overloads_well_formed &&
-        diagnose_overloads::is_overloads_well_formed;
+        check_applicable<diagnose_level::none>();
 };
 
 
@@ -1854,15 +1999,23 @@ struct diagnose_conv
  *
  * @tparam C  The convention type.
  * @tparam Os The overload types.
+ *
+ * `conv_traits<C>` inherits members from `diagnose_conv<C>` for convenience.
+ * * V: `applicable : bool`
+ * * F: `check_applicable<diagnose_level>() -> bool`
  */
 template<class C, class... Os>
-struct conv_traits_impl_ex : applicable_traits
+struct conv_traits_impl_ex : diagnose_conv<C>
 {
     ////////////////////
+private:
     static constexpr bool IS_DIRECT = C::is_direct;
     using D = typename C::dispatch_type;
 
     ////////////////////
+    // meta
+    ////////////////////
+public:
     /**
      * @brief The meta (table of dispatcher pointers) of the convention.
      *
@@ -1875,6 +2028,19 @@ struct conv_traits_impl_ex : applicable_traits
     using meta = composite_meta_impl<
         dispatcher_meta<meta_provider<IS_DIRECT, D, Os>>...>;
 
+    ////////////////////
+    // applicable_ptr
+    ////////////////////
+    template<diagnose_level level, class P>
+    static constexpr bool check_applicable_ptr(void)
+    {
+        // overload_traits::meta_provider::check_applicable_ptr()
+        constexpr bool overloads_applicable_ptr =
+            (overload_traits<Os>::template meta_provider<IS_DIRECT, D>
+             ::template check_applicable_ptr<level, P>() && ...);
+        return overloads_applicable_ptr;
+    }
+
     /**
      * @brief Check if dispatcher functions can be instantiated.
      *
@@ -1883,8 +2049,10 @@ struct conv_traits_impl_ex : applicable_traits
      */
     template<class P>
     static constexpr bool applicable_ptr =
-        (overload_traits<Os>::template applicable_ptr<IS_DIRECT, D, P> && ...);
+        check_applicable_ptr<diagnose_level::none, P>();
 
+    ////////////////////
+    // accessor
     ////////////////////
     /**
      * @brief An accesor type of a convention.
@@ -1907,21 +2075,32 @@ struct conv_traits_impl_ex : applicable_traits
  * @brief The convention traits.
  *
  * @tparam C The convention type.
+ *
+ * `conv_traits<C>` inherits members from `diagnose_conv<C>` for convenience.
+ * * V: `applicable : bool`
+ * * F: `check_applicable<diagnose_level>() -> bool`
  */
 template<class C, class = void>
-struct conv_traits_impl : inapplicable_traits
-{
-    // Refer to `diagnose_conv<C>::applicable` to trigger static asserts.
-    static constexpr bool applicable =
-        diagnose_conv<C, EnableAssert>::applicable;
-};
+struct conv_traits_impl : diagnose_conv<C> {};
 
 template<class C>
 struct conv_traits_impl<C,
-    std::enable_if_t<diagnose_conv<C, DisableAssert>::applicable, void>>
+    std::enable_if_t<diagnose_conv<C>::applicable, void>>
     : instantiated_t<conv_traits_impl_ex, typename C::overload_types, C>
 {};
 
+/**
+ * @brief The convention traits.
+ *
+ * @tparam C The convention type.
+ *
+ * `conv_traits<C>` provides the following members:
+ * * V: `applicable : bool`
+ * * F: `check_applicable<diagnose_level>() -> bool`
+ * * T: `meta = composite_meta_impl<>` type
+ * * F: `check_applicable_ptr<diagnose_level, P>() -> bool`
+ * * T: `accesor<F>`
+ */
 template<class C>
 using conv_traits = conv_traits_impl<C>;
 
@@ -2046,76 +2225,109 @@ private:
 
 
 ////////////////////////////////////////////////////////////////////////////////
-template<class F, class Assert, class... Cs>
+template<class F, class... Cs>
 struct diagnose_facade_convs
 {
     ////////////////////
-    template<class F_ = F, class = void>
-    struct is_conv_well_formed_impl : std::false_type {};
+    // applicable
+    ////////////////////
+    template<diagnose_level level>
+    static constexpr bool check_convs_applicable(void)
+    {
+        constexpr bool convs_applicable =
+            (diagnose_conv<Cs>::template check_applicable<level>() && ...);
+        return convs_applicable;
+    }
 
-    template<class F_>
-    struct is_conv_well_formed_impl<F_,
-    std::enable_if_t<(
-        (std::is_same_v<F_, F>) &&
-        /* All conventions are applicable */
-        (is_applicable_concept<conv_traits<Cs>...>)),
-        void>>
-        : std::true_type {};
-
-    static constexpr bool is_conv_well_formed =
-            is_conv_well_formed_impl<>::value;
-
-    static_assert(!Assert::value ||
-        is_applicable_concept<conv_traits<Cs>...>,
-        "The facade is inapplicable: some convention is inapplicable");
+    ////////////////////
+    // applicable_ptr
+    ////////////////////
+    template<diagnose_level level, class P>
+    static constexpr bool check_convs_applicable_ptr(void)
+    {
+        constexpr bool convs_applicable_ptr =
+            (conv_traits<Cs>::template check_applicable_ptr<level, P>() && ...);
+        return convs_applicable_ptr;
+    }
 };
 
-template<class F, class Assert = EnableAssert>
+template<class F>
 struct diagnose_facade
 {
     ////////////////////
+    // constraints
+    ////////////////////
+private:
     template<class F_ = F, class = void>
-    struct is_constraints_well_formed_impl : std::false_type {};
+    struct is_constraints_existent_impl : std::false_type {};
 
     template<class F_>
-    struct is_constraints_well_formed_impl<F_,
+    struct is_constraints_existent_impl<F_,
     std::enable_if_t<(
         (std::is_same_v<F_, F>) &&
         /* `F::constraints` is of type `proxiable_ptr_constraints` */
         (std::is_same_v<decltype((F_::constraints)), const proxiable_ptr_constraints&>) &&
         /* `F::constraints` is evaluable at compile time */
         ((void)F_::constraints, true)),
-        void>> : std::bool_constant<
-        // NOTE: MSVC C++17 has an issue that member fields of constexpr object
-        //       (e.g., `F::constraints`) cannot be evaluated directly within
-        //       the conditional part of the `enable_if<>`.
-        //       Therefore, the member fields are evaluated in the body part
-        //       of the class template.
-        /* `F::constraints.max_align` is a power of two */
-        (is_pow2_v<F_::constraints.max_align>) &&
-        /* `F::constraints.max_size` is a multiple of `F::constraints.max_align */
-        (F_::constraints.max_size % F_::constraints.max_align == 0u)>
-    {};
+        void>>
+        : std::true_type {};
+
+    template<diagnose_level level>
+    static constexpr bool check_constraints_well_formed(void)
+    {
+        constexpr bool is_constraints_existent =
+                is_constraints_existent_impl<F>::value;
+        if constexpr (level == diagnose_level::assert)
+        {
+            static_assert(is_constraints_existent,
+            "The facade F is inapplicable\n"
+            "========================================\n"
+            "| * F::constraints must exist\n"
+            "| * F::constraints must be a constexpr proxiable_ptr_constraints\n"
+            "========================================\n");
+        }
+        if constexpr (is_constraints_existent)
+        {
+            /* `F::constraints.max_align` is a power of two */
+            constexpr bool is_max_align_pow_of_two =
+                is_pow2_v<F::constraints.max_align>;
+            if constexpr (level == diagnose_level::assert)
+            {
+                static_assert(is_constraints_existent,
+                "The facade F is inapplicable\n"
+                "========================================\n"
+                "| * F::constraints::max_align must be a power of two\n"
+                "========================================\n");
+            }
+            /* `F::constraints.max_size` is a multiple of `F::constraints.max_align */
+            constexpr bool is_max_size_multiple_of_max_align =
+                (F::constraints.max_size % F::constraints.max_align == 0u);
+            if constexpr (level == diagnose_level::assert)
+            {
+                static_assert(is_max_size_multiple_of_max_align,
+                "The facade F is inapplicable\n"
+                "========================================\n"
+                "| * F::constraints::max_size must be a multiple of F::constraints::max_size\n"
+                "========================================\n");
+            }
+            return is_max_align_pow_of_two &&
+                   is_max_size_multiple_of_max_align;
+        }
+        return is_constraints_existent;
+    }
 
     static constexpr bool is_constraints_well_formed =
-            is_constraints_well_formed_impl<F>::value;
-
-    static_assert(!Assert::value ||
-        is_pow2_v<F::constraints.max_align>,
-        "The facade is inapplicable: `max_align` is not a power of two");
-    static_assert(!Assert::value ||
-        F::constraints.max_size % F::constraints.max_align == 0u,
-        "The facade is inapplicable: `max_size` is not a multiple of `max_align`");
-    static_assert(!Assert::value ||
-        is_constraints_well_formed,
-        "The facade is inapplicable: `constraints` is not a constexpr `proxiable_ptr_constraints`");
+        check_constraints_well_formed<diagnose_level::none>();
 
     ////////////////////
+    // conventions
+    ////////////////////
+private:
     template<class F_ = F, class = void>
-    struct is_conv_well_formed_impl : std::false_type {};
+    struct is_convs_tuple_like_impl : std::false_type {};
 
     template<class F_>
-    struct is_conv_well_formed_impl<F_,
+    struct is_convs_tuple_like_impl<F_,
     std::enable_if_t<(
         (std::is_same_v<F_, F>) &&
         /* `F::convention_types` exists and is tuple-like */
@@ -2123,54 +2335,103 @@ struct diagnose_facade
         void>>
         : std::true_type {};
 
-    static constexpr bool is_conv_well_formed =
-            is_conv_well_formed_impl<>::value;
-
-    static_assert(!Assert::value |
-        is_conv_well_formed,
-        "The facade is inapplicable: `convention_types` is not a tuple type");
+    template<diagnose_level level>
+    static constexpr bool check_convs_well_formed(void)
+    {
+        constexpr bool is_convs_tuple_like =
+            is_convs_tuple_like_impl<>::value;
+        if constexpr (level == diagnose_level::assert)
+        {
+            static_assert(is_convs_tuple_like,
+            "The facade F is inapplicable\n"
+            "========================================\n"
+            "| * F::convention_types must exist\n"
+            "| * F::convention_types must be tuple-like\n"
+            "========================================\n");
+        }
+        if constexpr (is_convs_tuple_like)
+        {
+            using diagnose_convs = instantiated_t<
+                diagnose_facade_convs, typename F::convention_types, F>;
+            constexpr bool convs_applicable =
+                diagnose_convs::template check_convs_applicable<level>();
+            return convs_applicable;
+        }
+        return is_convs_tuple_like;
+    }
 
     ////////////////////
-    using diagnose_convs = instantiated_t<
-        diagnose_facade_convs, typename F::convention_types, F, Assert>;
+    // applicable
+    ////////////////////
+public:
+    template<diagnose_level level>
+    static constexpr bool check_applicable(void)
+    {
+        return check_constraints_well_formed<level>() &&
+               check_convs_well_formed<level>();
+    }
 
     static constexpr bool applicable =
-        // is_constraints_well_formed &&
-        is_conv_well_formed &&
-        diagnose_convs::is_conv_well_formed;
+        check_applicable<diagnose_level::none>();
+
+    ////////////////////
+    // conv_applicable_ptr
+    ////////////////////
+public:
+    template<diagnose_level level, class P>
+    static constexpr bool check_conv_applicable_ptr(void)
+    {
+        using diagnose_convs = instantiated_t<
+            diagnose_facade_convs, typename F::convention_types, F>;
+        constexpr bool convs_applicable_ptr =
+            diagnose_convs::template check_convs_applicable_ptr<level, P>();
+        return convs_applicable_ptr;
+    }
+
+    template<class P>
+    static constexpr bool conv_applicable_ptr =
+        check_conv_applicable_ptr<diagnose_level::none, P>();
 };
 
-
-////////////////////////////////////////
+/**
+ * @brief The facade traits.
+ *
+ * @tparam F  The facade type.
+ * @tparam Cs The convention types.
+ *
+ * `facade_traits<F>` inherits members from `diagnose_facade<F>` for convenience.
+ * * V: `applicable : bool`
+ * * F: `check_applicable<diagnose_level>() -> bool`
+ * * V: `conv_applicable_ptr<P> : bool`
+ * * F: `check_conv_applicable_ptr<diagnose_level, P>() -> bool`
+ */
 template<class F, class... Cs>
-struct facade_conv_traits_impl
-    : applicable_traits
+struct facade_traits_impl_ex : diagnose_facade<F>
 {
     using conv_meta = composite_meta<typename conv_traits<Cs>::meta...>;
     using indirect_accessor = facade_accessor<F, false>;
     using direct_accessor   = facade_accessor<F, true>;
-
-    template<class P>
-    static constexpr bool conv_applicable_ptr =
-        (conv_traits<Cs>::template applicable_ptr<P> && ...);
 };
 
-template<class F, class... Cs>
-using facade_conv_traits = facade_conv_traits_impl<F, Cs...>;
-
+/**
+ * @brief The facade traits.
+ *
+ * @tparam F  The facade type.
+ * @tparam Cs The convention types.
+ *
+ * `facade_traits<F>` inherits members from `diagnose_facade<F>` for convenience.
+ * * V: `applicable : bool`
+ * * F: `check_applicable<diagnose_level>() -> bool`
+ * * V: `conv_applicable_ptr<P> : bool`
+ * * F: `check_conv_applicable_ptr<diagnose_level, P>() -> bool`
+ */
 template<class F, class = void>
-struct facade_traits
-    : inapplicable_traits
-{
-    // Refer to `diagnose_facade<F>::applicable` to trigger static asserts.
-    static constexpr bool applicable =
-        diagnose_facade<F, EnableAssert>::applicable;
-};
+struct facade_traits_impl : diagnose_facade<F> {};
 
 template<class F>
-struct facade_traits<F,
-    std::enable_if_t<diagnose_facade<F, EnableAssert>::applicable, void>>
-    : instantiated_t<facade_conv_traits, typename F::convention_types, F>
+struct facade_traits_impl<F,
+    std::enable_if_t<diagnose_facade<F>::applicable, void>>
+    : instantiated_t<facade_traits_impl_ex, typename F::convention_types, F>
 {
     using copyability_meta = lifetime_meta_t<
             copyability_meta_provider, F::constraints.copyability>;
@@ -2190,11 +2451,32 @@ struct facade_traits<F,
     using meta = composite_meta<copyability_meta,
                                 relocatability_meta,
                                 destructibility_meta,
-                                typename facade_traits::conv_meta>;
+                                typename facade_traits_impl::conv_meta>;
 
     static constexpr bool has_indirection = !std::is_same_v<
-        typename facade_traits::indirect_accessor, composite_accessor_impl<>>;
+        typename facade_traits_impl::indirect_accessor,
+        composite_accessor_impl<>>;
 };
+
+/**
+ * @brief The facade traits.
+ *
+ * @tparam F  The facade type.
+ * @tparam Cs The convention types.
+ *
+ * `facade_traits<F>` provides the following members:
+ * * V: `applicable : bool`
+ * * F: `check_applicable<diagnose_level>() -> bool`
+ * * V: `conv_applicable_ptr<P> : bool`
+ * * F: `check_conv_applicable_ptr<diagnose_level, P>() -> bool`
+ * * T: `copyability_meta`
+ * * T: `relocatability_meta`
+ * * T: `destructibility_meta`
+ * * T: `meta = composite_meta_impl<>`
+ * * V: `has_indirection : bool`
+ */
+template<class F>
+using facade_traits = facade_traits_impl<F>;
 
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -2203,72 +2485,120 @@ struct facade_traits<F,
  *
  * @tparam P The proxiable type.
  * @tparam F The facade type.
- * @tparam assert Set to `true` to enable static assertion.
+ *
+ * `diagnose_proxiable<P, F>` provides the following members:
+ * * V: `is_facade_applicable : bool`
+ * * F: `check_facade_applicable<diagnose_level>() -> bool`
+ * * V: `is_proxiable_well_formed : bool`
+ * * F: `check_proxiable_well_formed<diagnose_level>() -> bool`
  */
-template<class P, class F, class Assert = EnableAssert>
+template<class P, class F>
 struct diagnose_proxiable
 {
     ////////////////////
-    static constexpr bool is_facade_applicable = facade_traits<F>::applicable;
+    // facade
+    ////////////////////
+private:
+    template<diagnose_level level>
+    static constexpr bool check_facade_applicable(void)
+    {
+        constexpr bool is_facade_applicable =
+            facade_traits<F>::template check_applicable<level>();
+        return is_facade_applicable;
+    }
 
-    static_assert(is_facade_applicable, "The facade is inapplicable");
+    static constexpr bool is_facade_applicable =
+        check_facade_applicable<diagnose_level::none>();
 
     ////////////////////
-    template<class P_ = P, class = void>
-    struct is_proxiable_well_formed_impl : std::false_type {};
+    // proxiable
+    ////////////////////
+private:
+    template<diagnose_level level>
+    static constexpr bool check_proxiable_applicable(void)
+    {
+        constexpr bool is_proxiable_size_well_formed =
+            (sizeof(P) <= F::constraints.max_size);
+        if constexpr (level == diagnose_level::assert)
+        {
+            static_assert(is_proxiable_size_well_formed,
+            "The proxiable P is inapplicable for the facade F\n"
+            "========================================\n"
+            "| sizeof(P) must be no larger than F::constraints.max_size\n"
+            "========================================\n");
+        }
+        constexpr bool is_proxiable_align_well_formed =
+            (alignof(P) <= F::constraints.max_align);
+        if constexpr (level == diagnose_level::assert)
+        {
+            static_assert(is_proxiable_align_well_formed,
+            "The proxiable P is inapplicable for the facade F\n"
+            "========================================\n"
+            "| alignof(P) must be no larger than F::constraints.max_align\n"
+            "========================================\n");
+        }
+        constexpr bool is_copyability_consistent =
+            has_copyability_concept<P, F::constraints.copyability>;
+        if constexpr (level == diagnose_level::assert)
+        {
+            static_assert(is_copyability_consistent,
+            "The proxiable P is inapplicable for the facade F\n"
+            "========================================\n"
+            "| P is inconsistent with F::constraints.copyability\n"
+            "| * Try to set F::constraints.copyability to a larger value\n"
+            "========================================\n");
+        }
+        constexpr bool is_relocatability_consistent =
+            has_relocatability_concept<P, F::constraints.relocatability>;
+        if constexpr (level == diagnose_level::assert)
+        {
+            static_assert(is_relocatability_consistent,
+            "The proxiable P is inapplicable for the facade F\n"
+            "========================================\n"
+            "| P is inconsistent with F::constraints.relocatability\n"
+            "| * Try to set F::constraints.relocatability to a larger value\n"
+            "========================================\n");
+        }
+        constexpr bool is_destructibility_consistent =
+            has_destructibility_concept<P, F::constraints.destructibility>;
+        if constexpr (level == diagnose_level::assert)
+        {
+            static_assert(is_destructibility_consistent,
+            "The proxiable P is inapplicable for the facade F\n"
+            "========================================\n"
+            "| P is inconsistent with F::constraints.destructibility\n"
+            "| * Try to set F::constraints.destructibility to a larger value\n"
+            "========================================\n");
+        }
+        constexpr bool conv_applicable_ptr =
+            diagnose_facade<F>::template check_conv_applicable_ptr<level, P>();
+        return is_proxiable_size_well_formed  &&
+               is_proxiable_align_well_formed &&
+               is_copyability_consistent      &&
+               is_relocatability_consistent   &&
+               is_destructibility_consistent  &&
+               conv_applicable_ptr;
+    }
 
-    template<class P_>
-    struct is_proxiable_well_formed_impl<P_,
-        std::enable_if_t<(std::is_same_v<P_, P>),
-        void>> : std::bool_constant<
-        // NOTE: MSVC C++17 has an issue that member fields of constexpr object
-        //       (e.g., `F::constraints`) cannot be evaluated directly within
-        //       the conditional part of the `enable_if<>`.
-        //       Therefore, the member fields are evaluated in the body part
-        //       of the class template.
-        /* The size of the proxiable is within limit */
-        ( sizeof(P_) <= F::constraints.max_size)  &&
-        /* The alignment of the proxiable is within limit */
-        (alignof(P_) <= F::constraints.max_align) &&
-        /* The proxiable is copyable as specified */
-        (has_copyability_concept<P_, F::constraints.copyability>) &&
-        /* The proxiable is movable as specified */
-        (has_relocatability_concept<P_, F::constraints.relocatability>) &&
-        /* The proxiable is destructible as specified */
-        (has_destructibility_concept<P_, F::constraints.destructibility>) &&
-        /* The dispatcher functions can be instantiated */
-        (facade_traits<F>::template conv_applicable_ptr<P_>)>
-    {};
-
-    static constexpr bool is_proxiable_well_formed =
-            is_proxiable_well_formed_impl<>::value;
-
-    static_assert(!Assert::value ||
-        sizeof(P) <= F::constraints.max_size,
-        "The proxiable is inapplicable: size > F::constraints.max_size");
-    static_assert(!Assert::value ||
-        alignof(P) <= F::constraints.max_align,
-        "The proxiable is inapplicable: align > F::constraints.max_align");
-    static_assert(!Assert::value ||
-        has_copyability_concept<P, F::constraints.copyability>,
-        "The proxiable is inapplicable: inconsistent copyability constraint");
-    static_assert(!Assert::value ||
-        has_relocatability_concept<P, F::constraints.relocatability>,
-        "The proxiable is inapplicable: inconsistent relocatability constraint");
-    static_assert(!Assert::value ||
-        has_destructibility_concept<P, F::constraints.destructibility>,
-        "The proxiable is inapplicable: inconsistent destructibility constaint");
-    static_assert(!Assert::value ||
-        facade_traits<F>::template conv_applicable_ptr<P>,
-        "The proxiable is inapplicable: some dispatcher is inapplicable");
+    ////////////////////
+    // applicable
+    ////////////////////
+public:
+    template<diagnose_level level>
+    static constexpr bool check_applicable(void)
+    {
+        return check_facade_applicable<level>() &&
+               check_proxiable_applicable<level>();
+    }
 
     static constexpr bool applicable =
-            is_proxiable_well_formed;
+        check_facade_applicable<diagnose_level::none>();
 };
 
 template<class P, class F>
 inline constexpr bool is_proxiable_applicable =
-        diagnose_proxiable<P, F, DisableAssert>::applicable;
+        diagnose_proxiable<P, F>
+        ::template check_applicable<diagnose_level::none>();
 
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -2387,7 +2717,7 @@ struct proxy_helper
 ////////////////////////////////////////////////////////////////////////////////
 template<bool IS_DIRECT, class D, class O, class F, class... Args,
     std::enable_if_t<
-    diagnose_facade<F, EnableAssert>::applicable, void>* = nullptr>
+    diagnose_facade<F>::applicable, void>* = nullptr>
 auto proxy_invoke(proxy<F>& p, Args&&... args)
     noexcept(overload_traits<O>::is_noexcept)
     -> typename overload_traits<O>::return_type
@@ -2399,7 +2729,7 @@ auto proxy_invoke(proxy<F>& p, Args&&... args)
 
 template<bool IS_DIRECT, class D, class O, class F, class... Args,
     std::enable_if_t<
-    diagnose_facade<F, EnableAssert>::applicable, void>* = nullptr>
+    diagnose_facade<F>::applicable, void>* = nullptr>
 auto proxy_invoke(const proxy<F>& p, Args&&... args)
     noexcept(overload_traits<O>::is_noexcept)
     -> typename overload_traits<O>::return_type
@@ -2411,7 +2741,7 @@ auto proxy_invoke(const proxy<F>& p, Args&&... args)
 
 template<bool IS_DIRECT, class D, class O, class F, class... Args,
     std::enable_if_t<
-    diagnose_facade<F, EnableAssert>::applicable, void>* = nullptr>
+    diagnose_facade<F>::applicable, void>* = nullptr>
 auto proxy_invoke(proxy<F>&& p, Args&&... args)
     noexcept(overload_traits<O>::is_noexcept)
     -> typename overload_traits<O>::return_type
@@ -2423,7 +2753,7 @@ auto proxy_invoke(proxy<F>&& p, Args&&... args)
 
 template<bool IS_DIRECT, class D, class O, class F, class... Args,
     std::enable_if_t<
-    diagnose_facade<F, EnableAssert>::applicable, void>* = nullptr>
+    diagnose_facade<F>::applicable, void>* = nullptr>
 auto proxy_invoke(const proxy<F>&& p, Args&&... args)
     noexcept(overload_traits<O>::is_noexcept)
     -> typename overload_traits<O>::return_type
@@ -2493,7 +2823,7 @@ struct add_conv_reduction<std::tuple<Cs...>, C>
 
 template<class CT, bool IS_DIRECT, class D, class... Os>
 using add_conv_t = typename add_conv_reduction<CT,
-                    conv_impl<IS_DIRECT, D, Os...>>::type;
+                   convention<IS_DIRECT, D, Os...>>::type;
 
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -2502,9 +2832,13 @@ using add_conv_t = typename add_conv_reduction<CT,
  *
  * @tparam CT     The tuple of conventions.
  * @tparam Constr The `proxiable_ptr_constraints_impl<>` type.
+ *
+ * `facade<>` provides the following members for diagnostic:
+ * * V: `proxiable_applicable<P> : bool`
+ * * F: `assert_proxiable_applicable<P>() -> bool`
  */
 template<class CT, class Constr>
-struct facade_impl
+struct facade
 {
     using convention_types = CT;
 
@@ -2514,6 +2848,19 @@ struct facade_impl
                   Constr::copyability,
                   Constr::relocatability,
                   Constr::destructibility };
+
+    template<class P>
+    static constexpr bool assert_proxiable_applicable(void)
+    {
+        return diagnose_proxiable<P, facade>
+               ::template check_applicable<diagnose_level::assert>();
+    }
+
+    template<class P>
+    static constexpr bool proxiable_applicable =
+        diagnose_proxiable<P, facade>
+        ::template check_applicable<diagnose_level::none>();
+
 };
 
 
@@ -2521,10 +2868,20 @@ struct facade_impl
 
 
 ////////////////////////////////////////////////////////////////////////////////
+/**
+ * @brief The proxy.
+ *
+ * @tparam F The facade type.
+ *
+ * `proxy<F>` provides the following members for diagnostic:
+ * * V: `proxiable_applicable<P> : bool`
+ * * F: `assert_proxiable_applicable<P>() -> bool`
+ */
 template<class F>
 class NSFX_ENFORCE_EBO proxy
     : public details::facade_traits<F>::direct_accessor
 {
+private:
     // `meta_ptr()`.
     friend struct details::proxy_helper<F>;
 
@@ -2547,6 +2904,19 @@ class NSFX_ENFORCE_EBO proxy
 
     static constexpr bool can_dtor =
         (F::constraints.destructibility != constraint_level::none);
+
+public:
+    template<class P>
+    static constexpr bool assert_proxiable_applicable(void)
+    {
+        return details::diagnose_proxiable<P, F>
+               ::template check_applicable<diagnose_level::assert>();
+    }
+
+    template<class P>
+    static constexpr bool proxiable_applicable =
+        details::diagnose_proxiable<P, F>
+        ::template check_applicable<diagnose_level::none>();
 
 public:
     proxy(void) noexcept = default;
@@ -2661,7 +3031,7 @@ private:
 public:
     proxy(std::nullptr_t) noexcept : proxy{} {}
 
-#if defined(_MSC_VER)
+#if defined(_MSC_VER) // Also applies to clang++ for Windows.
     /**
      * @brief Construct a proxy by a proxiable object.
      *
@@ -3133,6 +3503,10 @@ private:
  *
  * @tparam CT     The tuple of conventions.
  * @tparam Constr The `proxiable_ptr_constraints_impl<>` type.
+ *
+ * `facade<>` provides the following members for diagnostic:
+ * * V: `proxiable_applicable<P> : bool`
+ * * F: `check_proxiable_applicable<diagnose_level, P>() -> bool`
  */
 template<class CT = std::tuple<>,
          class Constr = details::proxiable_ptr_constraints_impl<>>
@@ -3167,7 +3541,7 @@ struct basic_facade_builder
     using support_destruction = basic_facade_builder<
         CT, typename Constr::template support_destruction<level>>;
 
-    using build = details::facade_impl<CT, Constr>;
+    using build = details::facade<CT, Constr>;
 };
 
 using facade_builder = basic_facade_builder<>;

@@ -1,20 +1,17 @@
-# proxy in C++17
+/**
+ * @file
+ *
+ * @brief Test proxy.
+ *
+ * @author  Wei Tang <gauchyler@uestc.edu.cn>
+ * @date    2025-03-20
+ *
+ * @copyright Copyright (c) 2025.
+ *   National Key Laboratory of Science and Technology on Communications,
+ *   University of Electronic Science and Technology of China.
+ *   All rights reserved.
+ */
 
-The Microsoft proxy library requires compilers that support C++20, which may not be applicable in certain scenarios.
-
-This project is aimed to study the library, and attempt to port the library to C++17.
-
-It is a working version, but not all functions have been ported.
-
-Minimum Requirements for Compilers:
-
-| Family | Minimum version | Required flags |
-| ------ | --------------- | -------------- |
-| GCC    | 8.1.0           | -std=c++17     |
-| Clang  | 8.0.0           | -std=c++17     |
-| MSVC   | 19.30           | /std:c++17     |
-
-~~~
 #include "proxy.hpp"
 #include <memory>
 #include <iostream>
@@ -85,4 +82,3 @@ int main(void)
 
     return 0;
 }
-~~~
