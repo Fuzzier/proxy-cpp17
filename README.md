@@ -12,7 +12,7 @@ Minimum Requirements for Compilers:
 | ------ | --------------- | -------------- |
 | GCC    | 8.1.0           | -std=c++17     |
 | Clang  | 8.0.0           | -std=c++17     |
-| MSVC   | 19.30           | /std:c++17     |
+| MSVC   | 19.23           | /std:c++17     |
 
 ~~~
 #include "proxy.hpp"

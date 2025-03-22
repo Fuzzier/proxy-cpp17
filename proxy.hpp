@@ -730,14 +730,15 @@ template<class T>
 struct is_tuple_like_well_formed_concept_impl<T,
     std::enable_if_t<has_tuple_size_concept<T>, void>>
 {
-    template<class Is = std::make_index_sequence<std::tuple_size_v<T>>>
+    template<class Is>
     struct has_tuple_elements;
 
     template<std::size_t...Is>
     struct has_tuple_elements<std::index_sequence<Is...>>
         : std::bool_constant<(has_tuple_element_concept<T, Is> && ...)> {};
 
-    static constexpr bool value = has_tuple_elements<>::value;
+    static constexpr bool value = has_tuple_elements<
+        std::make_index_sequence<std::tuple_size_v<T>>>::value;
 };
 
 template<class T>
@@ -1538,7 +1539,8 @@ struct copyability_meta_provider
         }
         else
         {
-            return &copying_dispatcher<P>;
+            auto dispatcher = &copying_dispatcher<P>;
+            return dispatcher;
         }
     }
 };
@@ -1555,7 +1557,8 @@ struct relocatability_meta_provider
         }
         else
         {
-            return &relocation_dispatcher<P>;
+            auto dispatcher = &relocation_dispatcher<P>;
+            return dispatcher;
         }
     }
 };
@@ -1572,7 +1575,8 @@ struct destructibility_meta_provider
         }
         else
         {
-            return &destruction_dispatcher<P>;
+            auto dispatcher = &destruction_dispatcher<P>;
+            return dispatcher;
         }
     }
 };
