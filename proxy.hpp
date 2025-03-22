@@ -65,26 +65,64 @@ namespace pro {
  *
  * # Proxy
  *
- * A proxy is an object that provides polymorphism, that is, it exposes a set
- * of the operations on behalf of an object, while hidding the actual object
- * and the implementations of the operations.
+ * A *proxy* is an object that provides polymorphism, that is, it exposes a set
+ * of operations on behalf of an object, while hidding the actual object and
+ * the implementations of the operations.
  *
- * In other words, a proxy provides a set of member functions as a contrast,
- * and encapsulates the type of the underlying object and the implementations
- * of operations.
+ * In other words, a proxy provides an interface that consists of a set of
+ * *accessor* functions (member functions of the proxy), and encapsulates
+ * the type of the underlying object (also called the *proxiable* object) and
+ * the implementations of the accessor functions.
  *
- * 1. It provides a set of operations (member functions).
- * 2. It holds a type-erased reference to an actual object.
- * 3. The member functions invoke the functions that operates the actual object.
+ * 1. It provides a set of *accessor* functions.
+ * 2. It holds a type-erased reference to the *proxiable* object.
+ * 3. The *accessor* functions invoke the actual functions to operate
+ *    the *proxiable* object.
  *
- * The proxy holds the following data:
- * * A meta, that is, a table of virtual function pointers.
- * * A storage (array of bytes) that holds the type-erased object.
+ * The *proxy* holds the following data:
+ * * A storage (array of bytes) that holds the type-erased *proxiable* object.
+ * * A set of *accessor* functions.
+ *   - The accessor functions are conceptually *virtual* functions.
+ *   - Each accessor function has a predefined name and signature.
+ *   - The set of accessor forms an interface that is implemented by the proxy.
+ * * A *meta*, that is, a table of *dispatcher* function pointers.
+ *   - The meta is conceptually a *virtual* function table.
+ *   - Each dispatcher function pointer points to a dispatcher function.
+ *   - Each dispatcher function recovers the type of the proxiable object
+ *     stored in the proxy, and invokes the actual function that operates upon
+ *     the proxiable object.
  *
- * Each member function of a proxy is identified by two pieces of meta
- * information:
- * 1. The name of the member function.
- * 2. The overload (qualified signature) of the member function.
+ * @verbatim
+ *    virtual functions                           locates meta_ and ptr_
+ * +--------------------+      +----------------+ invokes disptacher function pointer
+ * | accessor functions | ---> | int foo(float) | --------------+
+ * +--------------------+      +----------------+               |
+ *                             | int bar(int)   |               |
+ *                             +----------------+               |
+ * virtual function table                                       v
+ * +--------------------+      +-----------------------------------+ points to dispatcher function
+ * |  meta_ : meta_ptr  | ---> | int (foo_dispatcher*)(ptr, float) | -------+
+ * +--------------------+      +-----------------------------------+        |
+ *                             | int (bar_dispatcher*)(ptr, int)   |        |
+ *                             +-----------------------------------+        |
+ *   type-erased object                                                     |
+ * +--------------------+                                                   |
+ * | ptr_ : std::byte[] |                                                   |
+ * +--------------------+                                                   |
+ *   ^                                                                      |
+ *   |                                                                      |
+ *   | recovers object type P  +-----------------------------------+        |
+ *   +------------------------ | int foo_dispatcher(ptr, float)    | <------+
+ *   | invokes actual callable +-----------------------------------+
+ *   |                         | int bar_dispatcher(ptr, int)      |
+ *   |                         +-----------------------------------+
+ *   v
+ * +-------------------+
+ * | int P::foo(float) |
+ * +-------------------+
+ * | int bar(P, int)   |
+ * +-------------------+
+ * @endverbatim
  *
  * # Callable
  *
@@ -108,8 +146,8 @@ namespace pro {
  *
  * ## What is a dispatch?
  *
- * A dispatch is a type that represents (binds to) the name of a callable.
- * It is an abstraction of the name of a callable.
+ * A *dispatch* is a type that represents (binds to) the name of a callable.
+ * It is an abstraction of the *name* of a callable.
  *
  * * Member dispatch
  *   A member dispatch represents the name of a member function.
@@ -131,13 +169,13 @@ namespace pro {
  * * `NSFX_DEF_FREE_DISPATCH()` : binds to the name of a free function.
  *
  * Since a dispatch is a class with member templates, it can be defined
- * in a namespace or in a class.
+ * in namespace or class, but not in function scope.
  *
- * # Proxied (P)
+ * # Proxiable (P)
  *
- * ## What is a proxied type?
+ * ## What is a proxiable type?
  *
- * A proxied type is the type of the object that provides operations.
+ * A *proxiable* type is the type of the object that provides operations.
  * * The object type that provides the member functions.
  * * The 1st argument type of the free functions.
  *
@@ -145,14 +183,16 @@ namespace pro {
  *
  * ## What is an overload?
  *
- * An overload is a qualified signature type.
+ * An *overload* is a qualified signature type.
+ * It is an abstraction of an *operation*, that is, the input parameter types and
+ * the return type of an operation.
  *
- * The overload determines the *name-erased* and *type-erased* form of a callable,
- * i.e., a function pointer.
+ * The overload determines the *name-erased* form of an operation, that is,
+ * a function pointer.
  *
  * It provides the following meta information:
+ * * The types of input parameters.
  * * The type of return value.
- * * The types of arguments.
  * * The `noexcept` specification.
  * * The `const` and `ref` qualifications (for member functions).
  *
@@ -170,7 +210,7 @@ namespace pro {
  * * `R(Args...) const&&`
  * * `R(Args...) const&& noexcept`
  *
- * ### Member function
+ * ## Member function
  *
  * The overload of a member function **does not** include the type of
  * `this` pointer.
@@ -186,7 +226,7 @@ namespace pro {
  * };
  * ~~~
  *
- * ### Free function
+ * ## Free function
  *
  * The overload of a free function **does not** include the type of
  * the *1st argument/operand*.
@@ -199,148 +239,165 @@ namespace pro {
  * void foo(P&, int, float);
  * ~~~
  *
- * ## Dispatcher
+ * # Dispatcher
  *
- * A dispatcher is a function that invokes the actual function.
+ * A *dispatcher* is an implementation function that invokes the actual callable.
  *
  * The dispatcher type is a function pointer type that looks like:
  * ~~~
  * R(*)(std::byte&, Args...)
  * ~~~
+ * The 1st argument is the storage that holds the type-erased proxiable object.
  *
- * The 1st argument is a storage that holds a pointer to the proxied
- * object, or the proxied object itself if the object is small enough.
+ * The dispatcher is deduced from D, O, P:
  *
- * * name-erasure
- * The name of the actual function is erased by calling a function pointer.
+ * @verbatim
+ * D + O + P => dispatcher function
+ * @endverbatim
  *
- * * type-erasure
- * The type of the proxied object is erased by the 1st argument.
+ * * `D` and `O` give the name and signature of the callable.
+ *   e.g., the name and signature of the member function of the proxiable `P`,
+ *   or the name and signature of the free function that operates upon `P`.
+ * * `P` gives the type of the proxiable object.
  *
- * The dispatcher type is totally determined by the overload, which is
- * the name-erased and type-erased form of a callable.
+ * The dispatcher adopts `P` to recover the type of the type-erased proxiable
+ * object, and uses `D` and `O` to invoke the member function of the proxiable
+ * object, or the free function that operates upon the proxiable object.
  *
- * For example:
- * ~~~
- * The dispatcher type of `foo` is `void(*)(std::byte&, int, float)`.
- * ~~~
- * * The 1st argument refers to the type-erased object.
- * * The function pointer erases the name of the callable.
+ * ## Dispatcher pointer
+ *
+ * The type of the dispatcher function is totally determined by the overload,
+ * which is the name-erased and type-erased form of a callable.
  *
  * @verbatim
  * O => dispatcher type (function pointer)
  * @endverbatim
  *
- * The overload determines the dispatcher type, i.e., the name-erased and
- * type-erased form of a callable.
+ * For example:
+ * ~~~
+ * The dispatcher type of `foo` is `void(*)(std::byte&, int, float)`.
+ * ~~~
  *
- * The dispatcher function (the function that is referred to by the dispatcher)
- * requires two more pieces of meta information to invoke the actual callable:
- * 1. **D** (dispatch): it represents the name of the callable.
- * 2. **P** (proxied): the type of the proxied object.
+ * # Accessor (A)
+ *
+ * An *accessor* function is a member function that a proxy exposes on behave of
+ * the underlying proxiable object.
+ *
+ * The name of the accessor function is determined by the dispatch type `D`,
+ * while the signature of the accessor function is given by the overload type `O`.
+ *
+ * The dispatch type `D`:
+ * * Not only gives the name of the actual callable (the function that operates
+ *   upon the proxiable object).
+ * * But also gives the name of the accessor (interface) function of the proxy
+ *   that invokes the actual callable.
  *
  * @verbatim
- * O + D + P => dispacher function
+ * D + O => A
  * @endverbatim
  *
- * ## Meta provider (MP)
- *
- * A meta provider is a class template that generate a dispatcher function
- * from a proxied type (P).
+ * The set of accessor functions consists of the interface that a proxy promises
+ * to implement.
  *
  * @verbatim
- * O + D => MP (meta provider)
- * MP + P => dispatcher function
+ * D + Os... => As... = interface of the proxy
+ * @endverbatim
+ *
+ * An accessor class template is provided by the dispatch type `D`.
+ * The accessor class provides a *named* member function that invokes
+ * the dispatcher function pointer, which invokes the actual callable.
+ *
+ * The accessors classes are parent classes of a proxy, thus a proxy inherits
+ * the *named* member functions.
+ * * The accessor classes `As...` are merged into `composite_accessor<As...>`.
+ *
+ * # Meta provider (MP)
+ *
+ * A meta provider is a class template that generate a dispatcher function
+ * from a proxiable type `P`.
+ *
+ * @verbatim
+ * D + O => MP (meta provider)
+ * D + O + P => MP + P => dispatcher function
  * @endverbatim
  *
  * ~~~
  * overload_traits<O>::meta_provider<D>::get<P>()
  * ~~~
  *
- * ## Dispatcher meta (M)
+ * The meta provider is embedded in `overload_traits<>`, since the argument and
+ * return types are visible there.
  *
- * A dispatcher meta is a table that has a single dispatcher function pointer.
+ * # Dispatcher meta (M)
+ *
+ * A dispatcher meta is a table that holds a single dispatcher function pointer.
  *
  * @verbatim
- * MP => M
+ * D + O => MP => M
+ * M + P => dispatcher function
  * @endverbatim
  *
- * ## Meta
+ * # Meta
  *
- * A meta is a table of dispatcher function pointers.
- * It is a composite of dispatcher metas.
+ * A *meta* is a table of dispatcher function pointers.
+ * * It is a composite of dispatcher metas.
+ * * It is a table of dispatcher function pointers that invokes the callables.
+ * * The dispatcher meta are merged into `composite_meta<Ms...>`.
  *
  * @verbatim
- * Ms => composite_meta
+ * Ms... => meta
+ * Ms... + P => instance of a meta
  * @endverbatim
  *
  * # Convention (C)
  *
- * A convention is a class template that holds the following meta information:
- * 1. **D**: a dispatch type
- * 2. **Os**: a set of overloads
+ * A *convention* represents a set of accessor functions that:
+ * * Have the same name, determined by the dispatch type `D`.
+ * * Have different signature, determined by the overload types `Os`.
  *
  * @verbatim
- * D + Os = C
+ * C = D + Os... => As...
  * @endverbatim
  *
- * Each convention deduces a `composite_meta`.
+ * The `composite_accessor`s deduced by the conventions are further combined into
+ * a larger `composite_accessor`.
  *
  * @verbatim
- * C = D + Os => composite_meta
+ * Cs... => As... = interface of the proxy
+ * @endverbatim
+ *
+ * Each convention also deduces a set of dispatcher metas `Ms...`, which
+ * are merged into a `composite_meta<Ms...>`.
+ * * It is a table of dispatcher function pointers that invokes the callables
+ *   with the same name and different signatures.
+ *
+ * @verbatim
+ * C = D + Os... => Ms...
  * @endverbatim
  *
  * The `composite_meta`s deduced by the conventions are further combined into
  * a larger `composite_meta`.
+ * * It is a table of dispatcher function pointers that invokes the callables
+ *   with the different names or different signatures.
  *
  * @verbatim
- * Cs => composite_meta
+ * Cs... => Ms...
  * @endverbatim
  *
  * # Facade (F)
  *
  * A facade is a class that holds a set of convetions.
+ * * It determines the accessor functions of the proxy.
+ * * It determines the meta of the proxy.
  *
  * @verbatim
- * Cs = F
+ * F = Cs... => As... = interface of the proxy
+ * F = Cs... => Ms... = virtual table of the proxy
  * @endverbatim
  *
  * @verbatim
  * F => proxy
  * @endverbatim
- *
- * # Accessor (A)
- *
- * An accessor is a class that provides a *named* member function that invokes
- * the dispatcher function, which in effect invokes the actual callable.
- * It has the **same** name with the actual callable.
- *
- * The accessor is provided by the dispatch type, since the disptach type binds
- * to the name of the callable.
- *
- * The accessors are parent classes of a proxy, thus a proxy has several *named*
- * member functions, which name is the **same** as teh actual callable.
- *
- * Since the accessor has only the *name* of the callable, it requires more
- * information to locate the dispatcher function pointer in order to invoke it.
- * 1. **F**: The facade type.
- * 2. **D + O**: The dispatch type and overload type.
- *
- * ## How to obtain the proxy
- *
- * The facade type `F` is used to deduce the proxy type.
- * * Since the proxy type is a subclass of the accessor, the accessor can be
- *   downcast to a proxy.
- * The disptach type `D` and overload type `O` is used to deduce the dispatcher
- * meta type.
- * * Since the meta is a subclass of disptatcher meta, the meta can be upcast
- *   to the dispatcher meta.
- *
- * ## How to obtain the dispatcher
- *
- * The dispatcher is located in the meta table of the proxy.
- * The dispatcher is helds by the disptatcher meta.
- * The dispatcher meta type is uniquely determined by `D` and `O`.
  */
 template<class F> class proxy;
 
@@ -2969,7 +3026,7 @@ private:
                 rhs.meta_ptr()->facade_traits::copyability_meta
                                 ::dispatcher(*ptr_, *rhs.ptr_);
             }
-            // If copyability disptacher throws, `ia_meta_` remains null.
+            // If copyability disptatcher throws, `ia_meta_` remains null.
             ia_meta_ = rhs.ia_meta_;
         }
     }
@@ -3019,7 +3076,7 @@ private:
                 // May throw.
                 rhs.meta_ptr()->facade_traits::relocatability_meta
                                 ::dispatcher(*ptr_, *rhs.ptr_);
-                // If relocatability disptacher throws, `ia_meta_` remains null.
+                // If relocatability dispatcher throws, `ia_meta_` remains null.
                 ia_meta_ = rhs.ia_meta_;
             }
         }
