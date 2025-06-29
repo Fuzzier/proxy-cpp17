@@ -1098,8 +1098,8 @@ R indirect_conv_dispatcher(add_qualifier_t<std::byte, Q> self, Args... args)
 {
     return invoke_dispatch<D, R>(
         *std::forward<add_qualifier_t<P, Q>>(
-            // Use `std::launch()` to prevent compiler from assuming that
-            // the value stored in `self` was never changed.
+            // `std::launder()` must be used to obtain a pointer to the object
+            // created by placement new from the pointer to the storage.
             *std::launder(
                 // Indirect:
                 // `std::byte` stores `P`, which is a pointer type.
@@ -1127,9 +1127,8 @@ R direct_conv_dispatcher(add_qualifier_t<std::byte, Q> self, Args... args)
     noexcept(invocable_dispatch_ptr_direct_concept<D, P, Q, true, R, Args...>)
 {
     // Direct:
-    // `std::byte` stores `P`, which is an object type.
-    // Use `std::launch()` to prevent compiler from assuming that
-    // the value stored in `self` was never changed.
+    // `std::launder()` must be used to obtain a pointer to the object
+    // created by placement new from the pointer to the storage.
     auto& qp = *std::launder(
                 reinterpret_cast<add_qualifier_ptr_t<P, Q>>(&self));
     if constexpr (Q == qualifier_type::rv)
